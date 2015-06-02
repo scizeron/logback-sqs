@@ -25,7 +25,6 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
 import java.util.concurrent.Executors;
-import java.util.concurrent.locks.ReentrantLock;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.UnsynchronizedAppenderBase;
@@ -48,25 +47,22 @@ import com.amazonaws.services.sqs.model.SendMessageResult;
 
 /**
  * 
- * @author Bellevue
+ * @author stfciz
  *
+ *         2 juin 2015
  */
 public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
-  /**
-   * All synchronization in this class is done via the lock object.
-   */
-  private final ReentrantLock lock = new ReentrantLock(true);
 
   private String accessKey;
 
   private String secretKey;
 
   private String queueUrl;
-  
+
   private int threadPool = 0;
 
   private int maxMessageSizeInKB = 256;
-  
+
   private AmazonSQSAsyncClient sqs = null;
 
   /**
@@ -74,6 +70,18 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
    * an {@link OutputStream}.
    */
   private Encoder<ILoggingEvent> encoder;
+  
+  /**
+   * 
+   * @return
+   */
+  private AWSCredentialsProvider getCredentials() {
+    return new AWSCredentialsProviderChain(new StaticCredentialsProvider(
+        new AppenderCredentials()), new SystemPropertiesCredentialsProvider(),
+        new EnvironmentVariableCredentialsProvider(),
+        new ProfileCredentialsProvider(),
+        new InstanceProfileCredentialsProvider());
+  }
 
   @Override
   protected void append(ILoggingEvent eventObject) {
@@ -97,25 +105,20 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
       if (eventObject instanceof DeferredProcessingAware) {
         ((DeferredProcessingAware) eventObject).prepareForDeferredProcessing();
       }
-      // the synchronization prevents the OutputStream from being closed while
-      // we
-      // are writing. It also prevents multiple threads from entering the same
-      // converter. Converters assume that they are in a synchronized block.
+
       this.encoder.doEncode(eventObject);
 
     } catch (IOException ioe) {
-      // as soon as an exception occurs, move to non-started state
-      // and add a single ErrorStatus to the SM.
       this.started = false;
       addStatus(new ErrorStatus("IO failure in appender", this, ioe));
-    } finally {
     }
   }
 
   /**
    * 
-   * @author Bellevue
+   * @author stfciz
    *
+   * 2 juin 2015
    */
   private class SqsOutputStreamAdapter extends OutputStream {
 
@@ -128,26 +131,21 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
       if (bytes == null || bytes.length == 0) {
         return;
       }
-      
+
       final String msg = new String(bytes);
-      
-      if (bytes.length  > maxMessageSizeInKB * 1024) {
+
+      if (bytes.length > maxMessageSizeInKB * 1024) {
         addWarn(format("Logging event '%s' exceeds the maximum size of %dkB",
             msg, maxMessageSizeInKB));
         return;
       }
-      
+
       sqs.sendMessageAsync(new SendMessageRequest(queueUrl, msg),
           new AsyncHandler<SendMessageRequest, SendMessageResult>() {
             public void onError(Exception exception) {
-              addWarn(
-                  format(
-                      "Appender '%s' failed to send logging event '%s' to SQS",
-                      getName(), msg), exception);
+              addWarn(format("Appender '%s' failed to send logging event '%s' to '%s'", getName(), msg, queueUrl), exception);
             }
-
-            public void onSuccess(SendMessageRequest request,
-                SendMessageResult result) {
+            public void onSuccess(SendMessageRequest request, SendMessageResult result) {
               /** noop **/
             }
           });
@@ -158,15 +156,15 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
   public void start() {
     try {
       if (this.encoder == null) {
-        addStatus(new ErrorStatus("No encoder set for the appender named \""
-            + name + "\".", this));
+        addStatus(new ErrorStatus("No encoder set for the appender named \"" + name + "\".", this));
         return;
       }
 
       close();
-      
-      this.lock.lock();
-      this.sqs = new AmazonSQSAsyncClient(getCredentials(), this.threadPool > 0 ? Executors.newFixedThreadPool(this.threadPool) : Executors.newCachedThreadPool());
+
+      this.sqs = new AmazonSQSAsyncClient(getCredentials(),
+          this.threadPool > 0 ? Executors.newFixedThreadPool(this.threadPool)
+              : Executors.newCachedThreadPool());
       this.sqs.setEndpoint(new URI(this.queueUrl).getHost());
       this.encoder.init(new SqsOutputStreamAdapter());
 
@@ -174,11 +172,6 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
 
     } catch (Exception e) {
       addError(this.getClass() + " start failure", e);
-
-    } finally {
-      if (this.lock.isLocked()) {
-        this.lock.unlock();
-      }
     }
   }
 
@@ -192,14 +185,9 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
    * 
    */
   private void close() {
-    try {
-      this.lock.lock();
-      if (this.sqs != null) {
-        this.sqs.shutdown();
-        this.sqs = null;
-      }
-    } finally {
-      this.lock.unlock();
+    if (this.sqs != null) {
+      this.sqs.shutdown();
+      this.sqs = null;
     }
   }
 
@@ -227,18 +215,7 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
     this.queueUrl = queueUrl;
   }
 
-  /**
-   * 
-   * @return
-   */
-  protected AWSCredentialsProvider getCredentials() {
-    return new AWSCredentialsProviderChain(
-        new EnvironmentVariableCredentialsProvider(),
-        new SystemPropertiesCredentialsProvider(),
-        new StaticCredentialsProvider(new AppenderCredentials()),
-        new ProfileCredentialsProvider(),
-        new InstanceProfileCredentialsProvider());
-  }
+
 
   /**
    * 
@@ -263,7 +240,7 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
   public void setThreadPool(int threadPool) {
     this.threadPool = threadPool;
   }
-  
+
   /**
    * 
    * @author Bellevue
@@ -283,7 +260,5 @@ public class SqsAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
   public void setMaxMessageSizeInKB(int maxMessageSizeInKB) {
     this.maxMessageSizeInKB = maxMessageSizeInKB;
   }
-
-
 
 }
